@@ -1,117 +1,121 @@
 import * as THREE from 'three';
 import { SimplexNoise } from '../math/noise.js';
 
+/**
+ * Grand Procedural Endless Terrain System
+ * Features:
+ * - Multi-scale mountain ridges and rolling valley topography
+ * - Realistic highway cut-and-fill corridor blending
+ * - Slope-based rock cliff generation
+ * - Elevation-based highland coloring
+ * - Seamless chunk streaming and memory geometry pooling
+ */
 export class TerrainManager {
   constructor(scene, roadManager, options = {}) {
     this.scene = scene;
     this.roadManager = roadManager;
-    this.seed = options.seed || 101;
-    this.noise = new SimplexNoise(this.seed + 555);
-    this.mountainNoise = new SimplexNoise(this.seed + 888);
+    this.seed = options.seed || 108;
 
-    // Chunk configuration
-    this.chunkSize = 96; // 96m x 96m per chunk
-    this.segments = 24; // 24x24 segments per chunk (576 faces)
-    this.viewDistance = 3; // Chunk radius around player (7x7 = 49 chunks)
+    this.macroNoise = new SimplexNoise(this.seed + 101);
+    this.hillNoise = new SimplexNoise(this.seed + 202);
+    this.ridgeNoise = new SimplexNoise(this.seed + 303);
+    this.detailNoise = new SimplexNoise(this.seed + 404);
 
-    // Road corridor blending parameters
-    this.roadHalfWidth = this.roadManager.totalHalfWidth; // ~5.7m
-    this.blendDistance = 28.0; // Distance where road embankment blends fully into terrain
+    // Chunk grid configuration
+    this.chunkSize = 100; // 100m x 100m per chunk
+    this.segments = 24; // 24x24 quads (efficient for Intel UHD 620)
+    this.viewDistance = 3; // 7x7 chunks around player
 
-    // Active chunks: key = `${chunkX},${chunkZ}` -> ChunkData
+    // Road corridor parameters
+    this.roadHalfWidth = this.roadManager.totalHalfWidth; // ~6.2m
+    this.blendDistance = 32.0; // Distance where road embankment blends into terrain
+
     this.chunks = new Map();
+    this.geoPool = [];
 
-    // Default season colors
+    // Seasonal color palette
     this.seasonColors = {
-      grass: new THREE.Color(0x4a7c38),
-      grassDry: new THREE.Color(0x6e8e42),
-      rock: new THREE.Color(0x736d65),
-      dirt: new THREE.Color(0x827055)
+      grass: new THREE.Color(0x93783a),
+      grassDry: new THREE.Color(0xb59848),
+      rock: new THREE.Color(0x6e6357),
+      dirt: new THREE.Color(0x856b49)
     };
 
-    // Shared chunk material
     this.material = new THREE.MeshStandardMaterial({
       vertexColors: true,
       roughness: 0.92,
-      metalness: 0.05,
+      metalness: 0.06,
       flatShading: true,
       side: THREE.DoubleSide
     });
-
-    // Chunk pool for geometry reuse to prevent memory garbage collection stutter
-    this.geoPool = [];
   }
 
-  /**
-   * Sets the terrain colors for different seasons (Summer, Autumn, Winter, etc.)
-   */
   setSeasonColors(seasonData) {
     if (seasonData.grass) this.seasonColors.grass.set(seasonData.grass);
     if (seasonData.grassDry) this.seasonColors.grassDry.set(seasonData.grassDry);
     if (seasonData.rock) this.seasonColors.rock.set(seasonData.rock);
     if (seasonData.dirt) this.seasonColors.dirt.set(seasonData.dirt);
 
-    // Refresh all chunk vertex colors
     for (const chunk of this.chunks.values()) {
       this.colorizeChunk(chunk);
     }
   }
 
   /**
-   * Calculates raw natural terrain height at (x, z) before road blending
+   * Multi-scale natural terrain elevation (mountains, ridges, rolling hills, meadows)
    */
   getRawHeight(x, z) {
-    // Large rolling mountains & hills
-    const n1 = this.noise.fbm2D(x * 0.0014, z * 0.0014, 4, 0.5, 2.0);
-    // Medium hills & mounds
-    const n2 = this.noise.noise2D(x * 0.004, z * 0.004) * 0.35;
-    // Distant mountain ranges
-    const m = Math.max(0, this.mountainNoise.fbm2D(x * 0.0006, z * 0.0006, 3, 0.5, 2.0));
+    // 1. Distant sweeping mountain ridges (wavelength ~1200m)
+    const macro = this.macroNoise.fbm2D(x * 0.0008, z * 0.0008, 3, 0.5, 2.0);
 
-    return 4.0 + (n1 * 34.0) + (n2 * 12.0) + (m * 42.0);
+    // 2. Rolling hills and valleys (wavelength ~350m)
+    const hills = this.hillNoise.fbm2D(x * 0.0028, z * 0.0028, 3, 0.5, 2.0);
+
+    // 3. Ridged noise for sharp rocky crests and ridges
+    const rVal = Math.abs(this.ridgeNoise.noise2D(x * 0.0016, z * 0.0016));
+    const ridges = Math.pow(1.0 - rVal, 2.0);
+
+    // 4. Subtle micro mounds
+    const detail = this.detailNoise.noise2D(x * 0.008, z * 0.008) * 2.2;
+
+    return 6.0 + (macro * 45.0) + (hills * 18.0) + (ridges * 24.0) + detail;
   }
 
   /**
-   * Calculates final blended terrain height at any world (x, z) coordinate,
-   * guaranteeing the road sits smoothly in a sculpted corridor cut/fill.
+   * Calculates blended terrain height with seamless highway cut & fill
    */
   getHeightAt(x, z) {
-    const rawHeight = this.getRawHeight(x, z);
+    const rawH = this.getRawHeight(x, z);
     const roadInfo = this.roadManager.getClosestRoadPoint(x, z);
     const d = roadInfo.distanceToCenter;
 
-    // Inside road ribbon
+    // Roadbed surface
     if (d <= this.roadHalfWidth) {
-      return roadInfo.height - 0.06;
+      return roadInfo.height - 0.07;
     }
 
-    // Embankment transition zone
+    // Corridor cut/fill embankment transition zone
     if (d < this.blendDistance) {
       const u = (d - this.roadHalfWidth) / (this.blendDistance - this.roadHalfWidth);
-      // Smooth Hermite blend
-      const t = u * u * (3.0 - 2.0 * u);
-      const roadTargetH = roadInfo.height - 0.06;
-      return roadTargetH * (1.0 - t) + rawHeight * t;
+      // Quintic smoothstep for ultra-smooth slope blending
+      const t = u * u * u * (u * (u * 6 - 15) + 10);
+      const roadH = roadInfo.height - 0.07;
+      return roadH * (1.0 - t) + rawH * t;
     }
 
-    // Far from road
-    return rawHeight;
+    return rawH;
   }
 
-  /**
-   * Updates chunks around the player position: spawns new ones and culls distant ones
-   */
   update(carPosition) {
     const currentChunkX = Math.floor(carPosition.x / this.chunkSize);
     const currentChunkZ = Math.floor(carPosition.z / this.chunkSize);
 
     const neededKeys = new Set();
+    const r = this.viewDistance;
 
-    // Determine chunks in radius
-    for (let dx = -this.viewDistance; dx <= this.viewDistance; dx++) {
-      for (let dz = -this.viewDistance; dz <= this.viewDistance; dz++) {
-        // Manhattan or euclidean circle
-        if (dx * dx + dz * dz <= (this.viewDistance + 0.5) * (this.viewDistance + 0.5)) {
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dz = -r; dz <= r; dz++) {
+        if (dx * dx + dz * dz <= (r + 0.5) * (r + 0.5)) {
           const cx = currentChunkX + dx;
           const cz = currentChunkZ + dz;
           const key = `${cx},${cz}`;
@@ -124,48 +128,36 @@ export class TerrainManager {
       }
     }
 
-    // Cull chunks outside radius
+    // Cull distant chunks
     for (const [key, chunk] of this.chunks.entries()) {
       if (!neededKeys.has(key)) {
         this.scene.remove(chunk.mesh);
-        // Recycle geometry
         this.geoPool.push(chunk.mesh.geometry);
         this.chunks.delete(key);
       }
     }
   }
 
-  /**
-   * Acquires or allocates a PlaneGeometry for a chunk
-   */
   acquireGeometry() {
     if (this.geoPool.length > 0) {
       return this.geoPool.pop();
     }
-    const geo = new THREE.PlaneGeometry(
+    return new THREE.PlaneGeometry(
       this.chunkSize,
       this.chunkSize,
       this.segments,
       this.segments
     );
-    // Orient horizontally (XZ plane)
-    geo.rotateX(-Math.PI / 2);
-    return geo;
   }
 
-  /**
-   * Generates a new terrain chunk mesh at grid coordinates (cx, cz)
-   */
   createChunk(cx, cz) {
     const geo = this.acquireGeometry();
     const posAttr = geo.attributes.position;
-    const vertexCount = posAttr.count;
 
     const originX = cx * this.chunkSize;
     const originZ = cz * this.chunkSize;
-
-    // Reset base grid plane positions relative to chunk center
     const segs = this.segments;
+
     let idx = 0;
     for (let iz = 0; iz <= segs; iz++) {
       const zFrac = iz / segs - 0.5;
@@ -196,7 +188,6 @@ export class TerrainManager {
       mesh: null
     };
 
-    // Build color attribute
     this.colorizeChunk(chunk);
 
     const mesh = new THREE.Mesh(geo, this.material);
@@ -209,9 +200,6 @@ export class TerrainManager {
     return chunk;
   }
 
-  /**
-   * Applies vertex colors based on terrain slope, road proximity, and season
-   */
   colorizeChunk(chunk) {
     const geo = chunk.geometry;
     const posAttr = geo.attributes.position;
@@ -225,40 +213,33 @@ export class TerrainManager {
     }
 
     const tempColor = new THREE.Color();
-    const upVector = new THREE.Vector3(0, 1, 0);
 
     for (let i = 0; i < count; i++) {
       const wx = posAttr.getX(i);
       const wy = posAttr.getY(i);
       const wz = posAttr.getZ(i);
 
-      const nx = normAttr.getX(i);
       const ny = normAttr.getY(i);
-      const nz = normAttr.getZ(i);
+      const slope = 1.0 - ny; // 0 = flat horizontal, 1 = vertical cliff
 
-      // Slope angle from vertical (cos theta = ny)
-      const slope = 1.0 - ny; // 0 = flat, 1 = vertical cliff
-
-      // Proximity to road
       const roadInfo = this.roadManager.getClosestRoadPoint(wx, wz);
       const roadDist = roadInfo.distanceToCenter;
 
-      if (roadDist < this.roadHalfWidth + 3.0) {
-        // Dirt/shoulder edge blend
+      if (roadDist < this.roadHalfWidth + 3.2) {
+        // Dirt / gravel road edge
         tempColor.copy(this.seasonColors.dirt);
-      } else if (slope > 0.35) {
-        // Steep rock cliff
+      } else if (slope > 0.32) {
+        // Steep rock face
         tempColor.copy(this.seasonColors.rock);
-        // Slight noise variation
-        tempColor.offsetHSL(0, 0, (Math.sin(wx * 0.1) * 0.04));
+        tempColor.offsetHSL(0, 0, Math.sin(wx * 0.08 + wz * 0.08) * 0.05);
       } else {
-        // Rolling grass with dry grass patches
-        const grassMix = (Math.sin(wx * 0.03) * Math.cos(wz * 0.03) + 1.0) * 0.5;
-        tempColor.lerpColors(this.seasonColors.grass, this.seasonColors.grassDry, grassMix);
+        // Rolling grass with multi-frequency meadow patches
+        const patch = (Math.sin(wx * 0.025) * Math.cos(wz * 0.025) + 1.0) * 0.5;
+        tempColor.lerpColors(this.seasonColors.grass, this.seasonColors.grassDry, patch);
 
-        // Highlight high ridges slightly
-        if (wy > 25) {
-          tempColor.offsetHSL(0, -0.05, Math.min(0.12, (wy - 25) * 0.005));
+        // Subtle highland glow on tall peaks
+        if (wy > 32) {
+          tempColor.offsetHSL(0, -0.04, Math.min(0.14, (wy - 32) * 0.006));
         }
       }
 

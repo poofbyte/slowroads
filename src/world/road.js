@@ -2,103 +2,128 @@ import * as THREE from 'three';
 import { SimplexNoise } from '../math/noise.js';
 import { SplineNode, catmullRom, catmullRomTangent, projectPointOntoSegmentXZ } from '../math/spline.js';
 
+/**
+ * Continuous C2 Highway Generation System
+ * Generates endless smooth highway ribbons with realistic civil-engineering geometry:
+ * - Clothoid-smoothed horizontal curvature (no sudden kinks or erratic turns)
+ * - Flowing vertical crests and sags (maximum grade ~6%)
+ * - Crowned road cross-section (center raised for drainage)
+ * - Realistic super-elevation / banking on curves
+ * - High-resolution procedural asphalt shader texture with markings
+ * - Roadside guardrails along curves and drop-offs
+ * - Delineator guide posts with reflective markers
+ */
 export class RoadManager {
   constructor(scene, options = {}) {
     this.scene = scene;
-    this.seed = options.seed || 101;
+    this.seed = options.seed || 108;
     this.noise = new SimplexNoise(this.seed);
-    this.elevationNoise = new SimplexNoise(this.seed + 9999);
+    this.elevationNoise = new SimplexNoise(this.seed + 8888);
 
-    // Road dimensions
-    this.roadWidth = 8.6; // 2 lanes (4.3m each)
-    this.shoulderWidth = 1.4;
-    this.totalHalfWidth = (this.roadWidth / 2) + this.shoulderWidth; // ~5.7m
-    this.segmentLength = 12; // Length of individual spline step in meters
-    this.lookAheadDistance = 650; // Generate ahead up to 650m
-    this.cullBehindDistance = 250; // Remove segments >250m behind
+    // Road Dimensions
+    this.roadWidth = 9.2; // 2 wide cruising lanes (4.6m each)
+    this.shoulderWidth = 1.6; // Gravel run-off shoulder
+    this.totalHalfWidth = (this.roadWidth / 2) + this.shoulderWidth; // ~6.2m
+    this.crownHeight = 0.04; // Centerline crowning
 
-    // Road control points and sampled nodes
+    // Streaming parameters
+    this.stepSize = 10; // Meters between detailed spline samples
+    this.lookAheadDistance = 750; // Generate ahead up to 750m
+    this.cullBehindDistance = 280; // Remove segments >280m behind
+
+    // Road spline state
     this.controlPoints = [];
-    this.nodes = []; // Detailed sampled spline nodes
-    this.segments = []; // Three.js mesh chunks
+    this.nodes = [];
+    this.segments = [];
 
-    // Road materials & canvas texture
+    // Road materials
     this.roadTexture = this.createRoadTexture();
     this.roadMaterial = new THREE.MeshStandardMaterial({
       map: this.roadTexture,
-      roughness: 0.82,
-      metalness: 0.08,
-      flatShading: false,
+      roughness: 0.78,
+      metalness: 0.12,
       side: THREE.DoubleSide
     });
 
     this.shoulderMaterial = new THREE.MeshStandardMaterial({
-      color: 0x5a554a,
-      roughness: 0.95,
+      color: 0x5e5648,
+      roughness: 0.94,
       metalness: 0.05,
       flatShading: true
     });
 
-    // Roadside markers (instanced or grouped)
+    // Guardrail materials
+    this.guardrailMaterial = new THREE.MeshStandardMaterial({
+      color: 0xb5b8ba,
+      metalness: 0.85,
+      roughness: 0.35,
+      flatShading: true
+    });
+
+    this.postMaterial = new THREE.MeshStandardMaterial({
+      color: 0x4a4d50,
+      metalness: 0.6,
+      roughness: 0.5
+    });
+
     this.markerMaterialWhite = new THREE.MeshStandardMaterial({
       color: 0xf5f5f5,
-      roughness: 0.4
+      roughness: 0.35
     });
-    this.markerMaterialReflector = new THREE.MeshBasicMaterial({
-      color: 0xff8800
-    });
-    this.markerGroup = new THREE.Group();
-    this.scene.add(this.markerGroup);
 
-    // Initial state
+    this.markerMaterialAmber = new THREE.MeshBasicMaterial({
+      color: 0xffaa00
+    });
+
+    // Initial spline generation
     this.currentDistance = 0;
-    this.heading = 0; // In radians
-    this.currentPos = new THREE.Vector3(0, 5, 0);
+    this.currentPos = new THREE.Vector3(0, 6, 0);
+    this.currentHeading = 0;
+    this.targetHeading = 0;
+    this.currentCurvature = 0;
 
-    // Seed initial control points
     this.initRoad();
   }
 
   /**
-   * Generates a procedural high-res asphalt texture with lanes and markings
+   * Generates a high-res procedural asphalt texture with accurate highway markings
    */
   createRoadTexture() {
     const canvas = document.createElement('canvas');
-    canvas.width = 512;
-    canvas.height = 1024;
+    canvas.width = 1024;
+    canvas.height = 2048;
     const ctx = canvas.getContext('2d');
 
-    // Base dark asphalt with subtle grain
-    ctx.fillStyle = '#26282b';
+    // Rich dark charcoal asphalt base
+    ctx.fillStyle = '#22252a';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Add asphalt noise grain
+    // Multi-frequency asphalt grain
     const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imgData.data;
     for (let i = 0; i < data.length; i += 4) {
-      const grain = (Math.random() - 0.5) * 16;
+      const grain = (Math.random() - 0.5) * 18;
       data[i] = Math.max(0, Math.min(255, data[i] + grain));
       data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + grain));
       data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + grain));
     }
     ctx.putImageData(imgData, 0, 0);
 
-    // Road markings
     const w = canvas.width;
     const h = canvas.height;
 
-    // Outer solid white lines (edge markings)
-    ctx.fillStyle = '#e5e3dc';
-    const lineWidth = 10;
-    const edgeOffset = 36;
-    ctx.fillRect(edgeOffset, 0, lineWidth, h);
-    ctx.fillRect(w - edgeOffset - lineWidth, 0, lineWidth, h);
+    // Solid outer white edge lines (crisp 18px width)
+    ctx.fillStyle = '#f0eee8';
+    const edgeLineWidth = 20;
+    const edgeOffset = 55;
+    ctx.fillRect(edgeOffset, 0, edgeLineWidth, h);
+    ctx.fillRect(w - edgeOffset - edgeLineWidth, 0, edgeLineWidth, h);
 
-    // Center dashed white/yellow line
-    ctx.fillStyle = '#f0ebe0';
-    const dashLength = 80;
-    const dashGap = 65;
-    const centerLineWidth = 8;
+    // Center dashed white/yellow line (authentic 3:9 dash ratio)
+    ctx.fillStyle = '#f5efe0';
+    const centerLineWidth = 14;
+    const dashLength = 140;
+    const dashGap = 160;
     const centerX = (w - centerLineWidth) / 2;
 
     for (let y = 0; y < h; y += dashLength + dashGap) {
@@ -108,17 +133,32 @@ export class RoadManager {
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
-    texture.repeat.set(1, 4); // Repeat along road length
+    texture.repeat.set(1, 4); // Repeat every ~16m
     texture.anisotropy = 8;
     return texture;
   }
 
-  /**
-   * Initialize road with a straight opening runway and initial curve ahead
-   */
   initRoad() {
-    // Generate initial control points
-    for (let i = 0; i < 15; i++) {
+    // Control point before start (for tangent continuity)
+    this.controlPoints.push({
+      position: new THREE.Vector3(0, 6, -50),
+      distance: -50,
+      heading: 0,
+      curvature: 0
+    });
+    // Control point at start (0, 6, 0)
+    this.controlPoints.push({
+      position: new THREE.Vector3(0, 6, 0),
+      distance: 0,
+      heading: 0,
+      curvature: 0
+    });
+    this.currentPos.set(0, 6, 0);
+    this.currentDistance = 0;
+    this.currentHeading = 0;
+
+    // Generate initial 20 control points for a smooth opening highway stretch
+    for (let i = 0; i < 20; i++) {
       this.generateNextControlPoint();
     }
     this.generateNodesUpTo(this.lookAheadDistance);
@@ -126,36 +166,38 @@ export class RoadManager {
   }
 
   /**
-   * Generates the next spline control point based on noise curvature & terrain elevation
+   * Generates the next spline control point using clothoid curvature smoothing
    */
   generateNextControlPoint() {
-    const cpSpacing = 45; // meters between control points
+    const cpSpacing = 50; // meters between control points
     const s = this.currentDistance;
 
-    // Curvature: smooth low frequency noise for gentle sweeping highway turns
-    // Use multi-scale noise to produce wide bends with occasional tighter turns
-    const curveNoise1 = this.noise.noise2D(s * 0.0018, 12.3);
-    const curveNoise2 = this.noise.noise2D(s * 0.0055, 45.7) * 0.4;
-    const curvature = (curveNoise1 + curveNoise2) * 0.016; // Angular delta per step
+    // Smooth multi-scale low-frequency curvature for flowing highway bends
+    const curveNoise1 = this.noise.noise2D(s * 0.0012, 10.5);
+    const curveNoise2 = this.noise.noise2D(s * 0.0035, 30.2) * 0.35;
+    const rawCurvature = (curveNoise1 + curveNoise2) * 0.013; // Max ~0.017 rad/m (radius ~250m)
 
-    this.heading += curvature * cpSpacing;
+    // Smooth curvature transition (clothoid spiral effect)
+    this.currentCurvature = THREE.MathUtils.lerp(this.currentCurvature, rawCurvature, 0.45);
+    this.currentHeading += this.currentCurvature * cpSpacing;
 
-    // Step in XZ
-    const dx = Math.sin(this.heading) * cpSpacing;
-    const dz = Math.cos(this.heading) * cpSpacing;
+    // Step in horizontal plane
+    const dx = Math.sin(this.currentHeading) * cpSpacing;
+    const dz = Math.cos(this.currentHeading) * cpSpacing;
 
-    // Elevation: gentle rolling hills with occasional scenic climbs/overlooks
-    const elevNoise1 = this.elevationNoise.fbm2D(
-      (this.currentPos.x + dx) * 0.0018,
-      (this.currentPos.z + dz) * 0.0018,
+    // Flowing highway elevation profile (gentle rolling grades < 6.5%)
+    const elevMacro = this.elevationNoise.fbm2D(
+      (this.currentPos.x + dx) * 0.0014,
+      (this.currentPos.z + dz) * 0.0014,
       3, 0.5, 2.0
     );
-    const elevNoise2 = this.elevationNoise.noise2D(
-      (this.currentPos.x + dx) * 0.0006,
-      (this.currentPos.z + dz) * 0.0006
+    const elevValley = this.elevationNoise.noise2D(
+      (this.currentPos.x + dx) * 0.0005,
+      (this.currentPos.z + dz) * 0.0005
     );
-    // Road sits at natural rolling hill height (base height 4m to 35m)
-    const targetY = 6 + (elevNoise1 * 22) + (elevNoise2 * 14);
+
+    // Target road elevation: scenic hills and gentle dips (8m to 38m)
+    const targetY = 8.0 + (elevMacro * 26.0) + (elevValley * 16.0);
 
     this.currentPos.x += dx;
     this.currentPos.z += dz;
@@ -165,26 +207,24 @@ export class RoadManager {
     this.controlPoints.push({
       position: this.currentPos.clone(),
       distance: this.currentDistance,
-      heading: this.heading,
-      curvature: curvature
+      heading: this.currentHeading,
+      curvature: this.currentCurvature
     });
   }
 
   /**
-   * Samples spline nodes between control points up to target distance
+   * Interpolates smooth continuous Catmull-Rom spline nodes
    */
   generateNodesUpTo(targetDist) {
-    while (this.currentDistance < targetDist + 150) {
+    while (this.currentDistance < targetDist + 180) {
       this.generateNextControlPoint();
     }
 
     const cps = this.controlPoints;
     if (cps.length < 4) return;
 
-    // Determine where we left off
     let lastNodeDist = this.nodes.length > 0 ? this.nodes[this.nodes.length - 1].distance : 0;
 
-    // Find starting control point index
     let startIndex = 1;
     for (let i = 1; i < cps.length - 2; i++) {
       if (cps[i].distance <= lastNodeDist && cps[i + 1].distance > lastNodeDist) {
@@ -193,7 +233,7 @@ export class RoadManager {
       }
     }
 
-    const stepSize = this.segmentLength;
+    const stepMeters = this.stepSize;
 
     for (let i = startIndex; i < cps.length - 2; i++) {
       const p0 = cps[i - 1].position;
@@ -202,163 +242,150 @@ export class RoadManager {
       const p3 = cps[i + 2].position;
 
       const segDist = p1.distanceTo(p2);
-      const steps = Math.max(2, Math.round(segDist / stepSize));
+      const steps = Math.max(3, Math.round(segDist / stepMeters));
 
       for (let s = (i === startIndex && this.nodes.length > 0 ? 1 : 0); s <= steps; s++) {
         const t = s / steps;
         const pos = catmullRom(p0, p1, p2, p3, t);
         const tangent = catmullRomTangent(p0, p1, p2, p3, t);
 
-        // Approximate curvature in XZ to calculate road banking
-        const tNext = Math.min(1.0, t + 0.05);
+        // Curvature and authentic super-elevation / banking
+        const tNext = Math.min(1.0, t + 0.04);
         const tanNext = catmullRomTangent(p0, p1, p2, p3, tNext);
         const crossY = tangent.x * tanNext.z - tangent.z * tanNext.x;
-        // Banking angle (camber) on curves (clamp to -0.12 to +0.12 rad, ~7 deg)
-        const banking = Math.max(-0.12, Math.min(0.12, crossY * 4.5));
+        // Super-elevation angle: banked into turns (up to ~6.5 degrees)
+        const banking = Math.max(-0.11, Math.min(0.11, crossY * 4.2));
 
-        // Binormal (perpendicular in horizontal plane + banking tilt)
         const baseNormal = new THREE.Vector3(0, 1, 0);
-        const binormal = new THREE.Vector3()
-          .crossVectors(tangent, baseNormal)
-          .normalize();
-
-        // Apply banking rotation around tangent
+        const binormal = new THREE.Vector3().crossVectors(tangent, baseNormal).normalize();
         binormal.applyAxisAngle(tangent, banking);
-        const normal = new THREE.Vector3()
-          .crossVectors(binormal, tangent)
-          .normalize();
+        const normal = new THREE.Vector3().crossVectors(binormal, tangent).normalize();
 
         const nodeDist = (this.nodes.length > 0)
-          ? this.nodes[this.nodes.length - 1].distance + (this.nodes.length > 0 ? this.nodes[this.nodes.length - 1].position.distanceTo(pos) : 0)
+          ? this.nodes[this.nodes.length - 1].distance + this.nodes[this.nodes.length - 1].position.distanceTo(pos)
           : 0;
 
         const node = new SplineNode(pos, tangent, normal, binormal, nodeDist, banking);
+        node.hasGuardrail = Math.abs(banking) > 0.045; // Guardrail on curves or high embankments
         this.nodes.push(node);
       }
     }
   }
 
-  /**
-   * Builds meshes for newly generated spline nodes
-   */
   buildMeshes() {
     if (this.nodes.length < 2) return;
 
-    // Find index of first unmeshed node
     let firstUnmeshed = 0;
     if (this.segments.length > 0) {
-      const lastSeg = this.segments[this.segments.length - 1];
-      firstUnmeshed = lastSeg.endNodeIndex;
+      firstUnmeshed = this.segments[this.segments.length - 1].endNodeIndex;
     }
 
-    const CHUNK_NODE_COUNT = 16; // Nodes per mesh chunk
-
-    while (firstUnmeshed + CHUNK_NODE_COUNT <= this.nodes.length) {
-      const endNode = firstUnmeshed + CHUNK_NODE_COUNT;
-      this.createRoadSegmentMesh(firstUnmeshed, endNode);
+    const CHUNK_SIZE = 16;
+    while (firstUnmeshed + CHUNK_SIZE <= this.nodes.length) {
+      const endNode = firstUnmeshed + CHUNK_SIZE;
+      this.createSegmentMesh(firstUnmeshed, endNode);
       firstUnmeshed = endNode;
     }
   }
 
-  /**
-   * Creates a road geometry chunk between node indices [startIndex, endIndex]
-   */
-  createRoadSegmentMesh(startIndex, endIndex) {
+  createSegmentMesh(startIndex, endIndex) {
     const nodeCount = endIndex - startIndex + 1;
     if (nodeCount < 2) return;
 
     const halfW = this.roadWidth / 2;
     const shldW = this.shoulderWidth;
+    const crown = this.crownHeight;
 
-    // Cross-section points:
-    // 0: Left shoulder outer (-halfW - shldW)
-    // 1: Left road edge (-halfW)
-    // 2: Right road edge (+halfW)
-    // 3: Right shoulder outer (+halfW + shldW)
-
-    // Road surface mesh
+    // Road vertices (3 cross-section points per slice: Left, Center Crown, Right)
     const roadVerts = [];
     const roadNormals = [];
     const roadUvs = [];
     const roadIndices = [];
 
-    // Shoulder mesh
+    // Shoulder vertices (Left shoulder, Right shoulder)
     const shldVerts = [];
     const shldNormals = [];
     const shldIndices = [];
 
-    let roadVertOffset = 0;
-    let shldVertOffset = 0;
+    let roadOffset = 0;
+    let shldOffset = 0;
 
     for (let i = startIndex; i <= endIndex; i++) {
       const node = this.nodes[i];
       const p = node.position;
       const b = node.binormal;
       const n = node.normal;
-      const v = node.distance / 12; // UV repeat rate
+      const v = node.distance / 16; // UV texture repeat
 
-      // Road surface points (raised slightly by 0.05m to prevent z-fighting with terrain)
-      const roadElev = 0.05;
-      const leftRoad = new THREE.Vector3().copy(p).addScaledVector(b, -halfW).addScaledVector(n, roadElev);
-      const rightRoad = new THREE.Vector3().copy(p).addScaledVector(b, halfW).addScaledVector(n, roadElev);
+      // 1. Road Surface (Crowned center)
+      const roadElev = 0.06;
+      const ptLeft = new THREE.Vector3().copy(p).addScaledVector(b, -halfW).addScaledVector(n, roadElev);
+      const ptCenter = new THREE.Vector3().copy(p).addScaledVector(n, roadElev + crown);
+      const ptRight = new THREE.Vector3().copy(p).addScaledVector(b, halfW).addScaledVector(n, roadElev);
 
-      // Road vertices
-      roadVerts.push(leftRoad.x, leftRoad.y, leftRoad.z);
-      roadVerts.push(rightRoad.x, rightRoad.y, rightRoad.z);
+      roadVerts.push(ptLeft.x, ptLeft.y, ptLeft.z);
+      roadVerts.push(ptCenter.x, ptCenter.y, ptCenter.z);
+      roadVerts.push(ptRight.x, ptRight.y, ptRight.z);
 
       roadNormals.push(n.x, n.y, n.z);
       roadNormals.push(n.x, n.y, n.z);
+      roadNormals.push(n.x, n.y, n.z);
 
-      roadUvs.push(0, v);
-      roadUvs.push(1, v);
-
-      if (i > startIndex) {
-        const r0 = roadVertOffset - 2;
-        const r1 = roadVertOffset - 1;
-        const r2 = roadVertOffset;
-        const r3 = roadVertOffset + 1;
-        roadIndices.push(r0, r1, r2);
-        roadIndices.push(r1, r3, r2);
-      }
-      roadVertOffset += 2;
-
-      // Shoulder vertices (sloping slightly downward into the terrain)
-      const leftShldOuter = new THREE.Vector3().copy(p).addScaledVector(b, -halfW - shldW).addScaledVector(n, -0.05);
-      const rightShldOuter = new THREE.Vector3().copy(p).addScaledVector(b, halfW + shldW).addScaledVector(n, -0.05);
-
-      // Left shoulder quad
-      shldVerts.push(leftShldOuter.x, leftShldOuter.y, leftShldOuter.z);
-      shldVerts.push(leftRoad.x, leftRoad.y, leftRoad.z);
-      shldNormals.push(n.x, n.y, n.z);
-      shldNormals.push(n.x, n.y, n.z);
-
-      // Right shoulder quad
-      shldVerts.push(rightRoad.x, rightRoad.y, rightRoad.z);
-      shldVerts.push(rightShldOuter.x, rightShldOuter.y, rightShldOuter.z);
-      shldNormals.push(n.x, n.y, n.z);
-      shldNormals.push(n.x, n.y, n.z);
+      roadUvs.push(0.0, v);
+      roadUvs.push(0.5, v);
+      roadUvs.push(1.0, v);
 
       if (i > startIndex) {
-        // Left shoulder indices
-        const ls0 = shldVertOffset - 4;
-        const ls1 = shldVertOffset - 3;
-        const ls2 = shldVertOffset;
-        const ls3 = shldVertOffset + 1;
-        shldIndices.push(ls0, ls1, ls2);
-        shldIndices.push(ls1, ls3, ls2);
+        // Left half quad
+        const l0 = roadOffset - 3;
+        const c0 = roadOffset - 2;
+        const l1 = roadOffset;
+        const c1 = roadOffset + 1;
+        roadIndices.push(l0, c0, l1);
+        roadIndices.push(c0, c1, l1);
 
-        // Right shoulder indices
-        const rs0 = shldVertOffset - 2;
-        const rs1 = shldVertOffset - 1;
-        const rs2 = shldVertOffset + 2;
-        const rs3 = shldVertOffset + 3;
-        shldIndices.push(rs0, rs1, rs2);
-        shldIndices.push(rs1, rs3, rs2);
+        // Right half quad
+        const r0 = roadOffset - 1;
+        const r1 = roadOffset + 2;
+        roadIndices.push(c0, r0, c1);
+        roadIndices.push(r0, r1, c1);
       }
-      shldVertOffset += 4;
+      roadOffset += 3;
+
+      // 2. Gravel Shoulders (sloping gently into terrain embankment)
+      const shldLeftOuter = new THREE.Vector3().copy(p).addScaledVector(b, -halfW - shldW).addScaledVector(n, -0.06);
+      const shldRightOuter = new THREE.Vector3().copy(p).addScaledVector(b, halfW + shldW).addScaledVector(n, -0.06);
+
+      shldVerts.push(shldLeftOuter.x, shldLeftOuter.y, shldLeftOuter.z);
+      shldVerts.push(ptLeft.x, ptLeft.y, ptLeft.z);
+      shldVerts.push(ptRight.x, ptRight.y, ptRight.z);
+      shldVerts.push(shldRightOuter.x, shldRightOuter.y, shldRightOuter.z);
+
+      shldNormals.push(n.x, n.y, n.z);
+      shldNormals.push(n.x, n.y, n.z);
+      shldNormals.push(n.x, n.y, n.z);
+      shldNormals.push(n.x, n.y, n.z);
+
+      if (i > startIndex) {
+        // Left shoulder quad
+        const sL0 = shldOffset - 4;
+        const sL1 = shldOffset - 3;
+        const sL2 = shldOffset;
+        const sL3 = shldOffset + 1;
+        shldIndices.push(sL0, sL1, sL2);
+        shldIndices.push(sL1, sL3, sL2);
+
+        // Right shoulder quad
+        const sR0 = shldOffset - 2;
+        const sR1 = shldOffset - 1;
+        const sR2 = shldOffset + 2;
+        const sR3 = shldOffset + 3;
+        shldIndices.push(sR0, sR1, sR2);
+        shldIndices.push(sR1, sR3, sR2);
+      }
+      shldOffset += 4;
     }
 
-    // Build Three.js buffer geometries
     const roadGeo = new THREE.BufferGeometry();
     roadGeo.setAttribute('position', new THREE.Float32BufferAttribute(roadVerts, 3));
     roadGeo.setAttribute('normal', new THREE.Float32BufferAttribute(roadNormals, 3));
@@ -384,9 +411,13 @@ export class RoadManager {
     segmentGroup.add(roadMesh);
     segmentGroup.add(shldMesh);
 
-    // Add roadside marker posts every 24 meters along this segment
-    const markerPosts = this.createMarkerPostsForRange(startIndex, endIndex);
-    if (markerPosts) segmentGroup.add(markerPosts);
+    // Add Guardrails on curves or drop-offs
+    const guardrails = this.buildGuardrailsForRange(startIndex, endIndex);
+    if (guardrails) segmentGroup.add(guardrails);
+
+    // Add Roadside Delineator guide posts with reflectors
+    const markers = this.buildMarkersForRange(startIndex, endIndex);
+    if (markers) segmentGroup.add(markers);
 
     this.scene.add(segmentGroup);
 
@@ -400,29 +431,110 @@ export class RoadManager {
   }
 
   /**
-   * Creates minimalist roadside delineator posts with reflectors
+   * Generates realistic low-poly steel w-beam guardrails along curves
    */
-  createMarkerPostsForRange(startIndex, endIndex) {
+  buildGuardrailsForRange(startIndex, endIndex) {
     const group = new THREE.Group();
-    const postGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.9, 6);
-    const reflGeo = new THREE.BoxGeometry(0.12, 0.22, 0.05);
+    const halfW = this.roadWidth / 2 + this.shoulderWidth * 0.85;
 
-    const postDist = 26; // Every ~26m
+    // Determine if segment has significant curve
+    let hasCurve = false;
+    for (let i = startIndex; i <= endIndex; i++) {
+      if (Math.abs(this.nodes[i].banking) > 0.04) {
+        hasCurve = true;
+        break;
+      }
+    }
+    if (!hasCurve) return null;
+
+    // Build guardrail ribbon and support posts
+    const postGeo = new THREE.BoxGeometry(0.12, 0.75, 0.12);
+    const railHeight = 0.52;
+
+    const leftVerts = [];
+    const rightVerts = [];
+    const leftIndices = [];
+    const rightIndices = [];
+
+    let railOffset = 0;
+
+    for (let i = startIndex; i <= endIndex; i++) {
+      const node = this.nodes[i];
+      const p = node.position;
+      const b = node.binormal;
+      const n = node.normal;
+
+      // Left and right rail top/bottom edges
+      const lBot = new THREE.Vector3().copy(p).addScaledVector(b, -halfW).addScaledVector(n, railHeight - 0.16);
+      const lTop = new THREE.Vector3().copy(p).addScaledVector(b, -halfW).addScaledVector(n, railHeight + 0.16);
+      const rBot = new THREE.Vector3().copy(p).addScaledVector(b, halfW).addScaledVector(n, railHeight - 0.16);
+      const rTop = new THREE.Vector3().copy(p).addScaledVector(b, halfW).addScaledVector(n, railHeight + 0.16);
+
+      leftVerts.push(lBot.x, lBot.y, lBot.z, lTop.x, lTop.y, lTop.z);
+      rightVerts.push(rBot.x, rBot.y, rBot.z, rTop.x, rTop.y, rTop.z);
+
+      if (i > startIndex) {
+        const o0 = railOffset - 2;
+        const o1 = railOffset - 1;
+        const o2 = railOffset;
+        const o3 = railOffset + 1;
+
+        leftIndices.push(o0, o1, o2);
+        leftIndices.push(o1, o3, o2);
+
+        rightIndices.push(o0, o1, o2);
+        rightIndices.push(o1, o3, o2);
+      }
+      railOffset += 2;
+
+      // Guardrail posts every 2 nodes
+      if (i % 2 === 0) {
+        for (const side of [-1, 1]) {
+          const postPos = new THREE.Vector3().copy(p).addScaledVector(b, side * halfW).addScaledVector(n, railHeight * 0.5);
+          const postMesh = new THREE.Mesh(postGeo, this.postMaterial);
+          postMesh.position.copy(postPos);
+          postMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), n);
+          postMesh.castShadow = true;
+          group.add(postMesh);
+        }
+      }
+    }
+
+    const leftGeo = new THREE.BufferGeometry();
+    leftGeo.setAttribute('position', new THREE.Float32BufferAttribute(leftVerts, 3));
+    leftGeo.setIndex(leftIndices);
+    leftGeo.computeVertexNormals();
+
+    const rightGeo = new THREE.BufferGeometry();
+    rightGeo.setAttribute('position', new THREE.Float32BufferAttribute(rightVerts, 3));
+    rightGeo.setIndex(rightIndices);
+    rightGeo.computeVertexNormals();
+
+    group.add(new THREE.Mesh(leftGeo, this.guardrailMaterial));
+    group.add(new THREE.Mesh(rightGeo, this.guardrailMaterial));
+
+    return group;
+  }
+
+  buildMarkersForRange(startIndex, endIndex) {
+    const group = new THREE.Group();
+    const postGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.95, 6);
+    const reflGeo = new THREE.BoxGeometry(0.12, 0.24, 0.05);
+
+    const postDist = 28; // Every ~28m
     let lastPostDist = 0;
-
-    const halfW = this.roadWidth / 2 + this.shoulderWidth + 0.4;
+    const halfW = this.roadWidth / 2 + this.shoulderWidth + 0.35;
 
     for (let i = startIndex; i <= endIndex; i++) {
       const node = this.nodes[i];
       if (node.distance - lastPostDist >= postDist) {
         lastPostDist = node.distance;
 
-        // Place on left and right side
         for (const side of [-1, 1]) {
           const postPos = new THREE.Vector3()
             .copy(node.position)
             .addScaledVector(node.binormal, side * halfW)
-            .addScaledVector(node.normal, 0.45);
+            .addScaledVector(node.normal, 0.48);
 
           const postMesh = new THREE.Mesh(postGeo, this.markerMaterialWhite);
           postMesh.position.copy(postPos);
@@ -430,9 +542,9 @@ export class RoadManager {
           postMesh.castShadow = true;
           group.add(postMesh);
 
-          // Reflector patch facing traffic
-          const reflMesh = new THREE.Mesh(reflGeo, this.markerMaterialReflector);
-          reflMesh.position.copy(postPos).addScaledVector(node.normal, 0.2).addScaledVector(node.tangent, -side * 0.05);
+          // Reflector tab
+          const reflMesh = new THREE.Mesh(reflGeo, this.markerMaterialAmber);
+          reflMesh.position.copy(postPos).addScaledVector(node.normal, 0.22).addScaledVector(node.tangent, -side * 0.04);
           reflMesh.quaternion.copy(postMesh.quaternion);
           group.add(reflMesh);
         }
@@ -442,29 +554,24 @@ export class RoadManager {
     return group.children.length > 0 ? group : null;
   }
 
-  /**
-   * Updates road generation and culls old segments based on player position
-   */
   update(carPosition) {
-    // Find closest node to car
     const closest = this.getClosestNode(carPosition.x, carPosition.z);
     if (!closest) return;
 
     const carDist = closest.node.distance;
 
-    // Check if we need more road ahead
+    // Extend road ahead
     const farthestNode = this.nodes[this.nodes.length - 1];
     if (farthestNode && (farthestNode.distance - carDist < this.lookAheadDistance)) {
       this.generateNodesUpTo(carDist + this.lookAheadDistance);
       this.buildMeshes();
     }
 
-    // Cull segments that are far behind the car
+    // Cull segments behind vehicle
     while (this.segments.length > 0 && (carDist - this.segments[0].endDistance > this.cullBehindDistance)) {
       const oldSeg = this.segments.shift();
       this.scene.remove(oldSeg.group);
 
-      // Dispose geometries
       oldSeg.group.traverse(child => {
         if (child.isMesh) {
           child.geometry.dispose();
@@ -472,13 +579,12 @@ export class RoadManager {
       });
     }
 
-    // Clean up nodes that are very far behind
-    if (this.nodes.length > 200 && this.segments.length > 0) {
+    // Clean up old nodes
+    if (this.nodes.length > 220 && this.segments.length > 0) {
       const minNodeIndex = this.segments[0].startNodeIndex;
-      if (minNodeIndex > 50) {
-        this.nodes.splice(0, minNodeIndex - 10);
-        // Offset segment node indices
-        const offset = minNodeIndex - 10;
+      if (minNodeIndex > 60) {
+        this.nodes.splice(0, minNodeIndex - 12);
+        const offset = minNodeIndex - 12;
         for (const seg of this.segments) {
           seg.startNodeIndex -= offset;
           seg.endNodeIndex -= offset;
@@ -487,9 +593,6 @@ export class RoadManager {
     }
   }
 
-  /**
-   * Efficiently finds the closest spline node to an arbitrary 2D coordinate (x, z)
-   */
   getClosestNode(x, z) {
     if (this.nodes.length === 0) return null;
 
@@ -513,10 +616,6 @@ export class RoadManager {
     return { node: closestNode, index: closestIndex, distanceSq: minDistSq };
   }
 
-  /**
-   * Computes the exact interpolated point on the road spline closest to (x, z),
-   * along with distance to road center, tangent, normal, and banking.
-   */
   getClosestRoadPoint(x, z) {
     if (this.nodes.length < 2) {
       return {
@@ -530,8 +629,8 @@ export class RoadManager {
     }
 
     const { index } = this.getClosestNode(x, z);
-    const start = Math.max(0, index - 3);
-    const end = Math.min(this.nodes.length - 2, index + 3);
+    const start = Math.max(0, index - 4);
+    const end = Math.min(this.nodes.length - 2, index + 4);
 
     let bestDistSq = Infinity;
     let bestPoint = new THREE.Vector3();

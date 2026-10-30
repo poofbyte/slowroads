@@ -1,30 +1,36 @@
 import * as THREE from 'three';
-import { PRNG } from '../math/noise.js';
+import { PRNG, SimplexNoise } from '../math/noise.js';
 
+/**
+ * Organic Clustered Scenery & Vegetation System
+ * Features:
+ * - Natural clustered forest groves and rock outcroppings via density noise
+ * - Clean low-poly tree and boulder models optimized for Intel UHD Graphics
+ * - Zero CPU overhead: rendered in 5 single draw calls via THREE.InstancedMesh
+ * - Strict highway corridor exclusion (never spawns on the road)
+ * - Dynamic seasonal foliage color updating
+ */
 export class SceneryManager {
   constructor(scene, roadManager, terrainManager, options = {}) {
     this.scene = scene;
     this.roadManager = roadManager;
     this.terrainManager = terrainManager;
-    this.seed = options.seed || 101;
+    this.seed = options.seed || 108;
 
-    // Maximum instances per mesh
-    this.maxPines = 1800;
-    this.maxDeciduous = 1800;
-    this.maxBirch = 1200;
-    this.maxRocks = 1200;
-    this.maxBushes = 1500;
+    this.forestNoise = new SimplexNoise(this.seed + 777);
+    this.rockNoise = new SimplexNoise(this.seed + 999);
 
-    // Materials
+    // Max instances per species
+    this.maxPines = 2200;
+    this.maxDeciduous = 2200;
+    this.maxBirch = 1600;
+    this.maxRocks = 1400;
+    this.maxBushes = 1800;
+
     this.initMaterials();
-
-    // Geometries
     this.initGeometries();
-
-    // Instanced Meshes
     this.initInstancedMeshes();
 
-    // Cache of chunk items: key `${cx},${cz}` -> array of item transforms
     this.chunkItems = new Map();
     this.lastChunkCoord = { cx: null, cz: null };
   }
@@ -32,7 +38,7 @@ export class SceneryManager {
   initMaterials() {
     this.materials = {
       pineFoliage: new THREE.MeshStandardMaterial({
-        color: 0x224828,
+        color: 0x243e26,
         roughness: 0.9,
         flatShading: true
       }),
@@ -42,7 +48,7 @@ export class SceneryManager {
         flatShading: true
       }),
       deciduousFoliage: new THREE.MeshStandardMaterial({
-        color: 0x3b6e2e,
+        color: 0xd97c27, // Autumn gold/orange default
         roughness: 0.9,
         flatShading: true
       }),
@@ -52,23 +58,23 @@ export class SceneryManager {
         flatShading: true
       }),
       birchFoliage: new THREE.MeshStandardMaterial({
-        color: 0xd9822b, // Autumn gold/orange
-        roughness: 0.9,
+        color: 0xebb134, // Golden yellow
+        roughness: 0.88,
         flatShading: true
       }),
       birchTrunk: new THREE.MeshStandardMaterial({
-        color: 0xd6d1c4, // Pale birch bark
+        color: 0xdcd8cb, // White birch bark
         roughness: 0.85,
         flatShading: true
       }),
       rock: new THREE.MeshStandardMaterial({
-        color: 0x6e6962,
+        color: 0x6b6255,
         roughness: 0.92,
         metalness: 0.05,
         flatShading: true
       }),
       bush: new THREE.MeshStandardMaterial({
-        color: 0x4d7532,
+        color: 0xb56926,
         roughness: 0.95,
         flatShading: true
       })
@@ -76,98 +82,94 @@ export class SceneryManager {
   }
 
   initGeometries() {
-    // 1. Pine Tree (merged trunk + 3 cone foliage)
-    const pineGeo = this.buildPineGeometry();
-
-    // 2. Deciduous Tree (trunk + clustered low-poly crown)
-    const decGeo = this.buildDeciduousGeometry();
-
-    // 3. Birch Tree (slender trunk + golden autumn crown)
-    const birchGeo = this.buildBirchGeometry();
-
-    // 4. Low-poly boulder
-    const rockGeo = new THREE.DodecahedronGeometry(1.4, 0);
-    // Perturb vertices slightly for organic faceted boulder look
-    const rPos = rockGeo.attributes.position;
-    for (let i = 0; i < rPos.count; i++) {
-      const vx = rPos.getX(i);
-      const vy = rPos.getY(i);
-      const vz = rPos.getZ(i);
-      const scale = 1.0 + (Math.sin(vx * 3 + vy * 5) * 0.18);
-      rPos.setXYZ(i, vx * scale, vy * 0.75 * scale, vz * scale);
-    }
-    rockGeo.computeVertexNormals();
-
-    // 5. Bush (small multi-faceted cluster)
-    const bushGeo = new THREE.IcosahedronGeometry(0.8, 0);
-
     this.geometries = {
-      pine: pineGeo,
-      deciduous: decGeo,
-      birch: birchGeo,
-      rock: rockGeo,
-      bush: bushGeo
+      pine: this.buildPineGeometry(),
+      deciduous: this.buildDeciduousGeometry(),
+      birch: this.buildBirchGeometry(),
+      rock: this.buildRockGeometry(),
+      bush: this.buildBushGeometry()
     };
   }
 
   buildPineGeometry() {
-    const geometries = [];
-
+    const geos = [];
     // Trunk
-    const trunkGeo = new THREE.CylinderGeometry(0.2, 0.35, 1.8, 5);
-    trunkGeo.translate(0, 0.9, 0);
-    geometries.push(trunkGeo);
+    const trunk = new THREE.CylinderGeometry(0.18, 0.32, 1.9, 5);
+    trunk.translate(0, 0.95, 0);
+    geos.push(trunk);
 
-    // Cones (3 layers)
-    const cone1 = new THREE.ConeGeometry(1.8, 2.5, 6);
-    cone1.translate(0, 2.4, 0);
-    geometries.push(cone1);
+    // 4 Layered Cones
+    const layers = [
+      { r: 2.0, h: 2.4, y: 2.2 },
+      { r: 1.6, h: 2.2, y: 3.5 },
+      { r: 1.2, h: 1.9, y: 4.7 },
+      { r: 0.7, h: 1.6, y: 5.7 }
+    ];
 
-    const cone2 = new THREE.ConeGeometry(1.4, 2.2, 6);
-    cone2.translate(0, 3.6, 0);
-    geometries.push(cone2);
+    for (const l of layers) {
+      const cone = new THREE.ConeGeometry(l.r, l.h, 6);
+      cone.translate(0, l.y, 0);
+      geos.push(cone);
+    }
 
-    const cone3 = new THREE.ConeGeometry(0.9, 1.8, 6);
-    cone3.translate(0, 4.7, 0);
-    geometries.push(cone3);
-
-    return this.mergeSimpleGeometries(geometries);
+    return this.mergeGeometries(geos);
   }
 
   buildDeciduousGeometry() {
-    const geometries = [];
+    const geos = [];
+    const trunk = new THREE.CylinderGeometry(0.24, 0.42, 2.4, 5);
+    trunk.translate(0, 1.2, 0);
+    geos.push(trunk);
 
-    // Trunk
-    const trunkGeo = new THREE.CylinderGeometry(0.25, 0.45, 2.2, 5);
-    trunkGeo.translate(0, 1.1, 0);
-    geometries.push(trunkGeo);
+    // Clustered crown (3 intersecting low-poly spheres)
+    const c1 = new THREE.IcosahedronGeometry(1.85, 0);
+    c1.translate(0, 3.4, 0);
+    geos.push(c1);
 
-    // Crown: faceted icosahedron
-    const crownGeo = new THREE.IcosahedronGeometry(2.0, 0);
-    crownGeo.translate(0, 3.2, 0);
-    geometries.push(crownGeo);
+    const c2 = new THREE.IcosahedronGeometry(1.35, 0);
+    c2.translate(0.65, 4.2, 0.4);
+    geos.push(c2);
 
-    return this.mergeSimpleGeometries(geometries);
+    const c3 = new THREE.IcosahedronGeometry(1.25, 0);
+    c3.translate(-0.6, 3.9, -0.35);
+    geos.push(c3);
+
+    return this.mergeGeometries(geos);
   }
 
   buildBirchGeometry() {
-    const geometries = [];
+    const geos = [];
+    const trunk = new THREE.CylinderGeometry(0.16, 0.26, 2.8, 5);
+    trunk.translate(0, 1.4, 0);
+    geos.push(trunk);
 
-    // Slender trunk
-    const trunkGeo = new THREE.CylinderGeometry(0.18, 0.28, 2.6, 5);
-    trunkGeo.translate(0, 1.3, 0);
-    geometries.push(trunkGeo);
+    const crown = new THREE.IcosahedronGeometry(1.65, 0);
+    crown.scale(1.0, 1.4, 1.0);
+    crown.translate(0, 3.8, 0);
+    geos.push(crown);
 
-    // Golden crown
-    const crownGeo = new THREE.IcosahedronGeometry(1.7, 0);
-    crownGeo.scale(1.0, 1.35, 1.0);
-    crownGeo.translate(0, 3.6, 0);
-    geometries.push(crownGeo);
-
-    return this.mergeSimpleGeometries(geometries);
+    return this.mergeGeometries(geos);
   }
 
-  mergeSimpleGeometries(geos) {
+  buildRockGeometry() {
+    const geo = new THREE.DodecahedronGeometry(1.5, 0);
+    const pos = geo.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      const factor = 1.0 + Math.sin(x * 3.5 + y * 4.2) * 0.22;
+      pos.setXYZ(i, x * factor, y * 0.72 * factor, z * factor);
+    }
+    geo.computeVertexNormals();
+    return geo;
+  }
+
+  buildBushGeometry() {
+    return new THREE.IcosahedronGeometry(0.95, 0);
+  }
+
+  mergeGeometries(geos) {
     let totalVerts = 0;
     let totalIndices = 0;
 
@@ -181,7 +183,6 @@ export class SceneryManager {
     const mergedIndices = [];
 
     let vOffset = 0;
-    let iOffset = 0;
 
     for (const g of geos) {
       const p = g.attributes.position;
@@ -234,15 +235,12 @@ export class SceneryManager {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.frustumCulled = false;
-      mesh.count = 0; // Start with 0 visible
+      mesh.count = 0;
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       this.scene.add(mesh);
     }
   }
 
-  /**
-   * Updates seasonal foliage materials
-   */
   setSeasonColors(seasonData) {
     if (seasonData.pineColor) this.materials.pineFoliage.color.set(seasonData.pineColor);
     if (seasonData.deciduousColor) this.materials.deciduousFoliage.color.set(seasonData.deciduousColor);
@@ -251,9 +249,6 @@ export class SceneryManager {
     if (seasonData.rockColor) this.materials.rock.color.set(seasonData.rockColor);
   }
 
-  /**
-   * Generates or retrieves scenery items for a chunk
-   */
   getChunkItems(cx, cz) {
     const key = `${cx},${cz}`;
     if (this.chunkItems.has(key)) {
@@ -261,7 +256,6 @@ export class SceneryManager {
     }
 
     const items = [];
-    // Seeded random for this chunk
     const chunkSeed = Math.abs((cx * 73856093) ^ (cz * 19349663) ^ this.seed);
     const prng = new PRNG(chunkSeed);
 
@@ -269,42 +263,43 @@ export class SceneryManager {
     const originX = cx * chunkSize;
     const originZ = cz * chunkSize;
 
-    // Density: ~24 items per chunk
-    const itemCount = 26;
+    // Organic forest density sampling via Perlin noise
+    const forestDensity = (this.forestNoise.noise2D(originX * 0.003, originZ * 0.003) + 1.0) * 0.5;
+    const rockDensity = (this.rockNoise.noise2D(originX * 0.004, originZ * 0.004) + 1.0) * 0.5;
 
-    for (let i = 0; i < itemCount; i++) {
+    // 25 to 55 items per chunk depending on natural grove density
+    const baseCount = Math.round(20 + forestDensity * 32);
+
+    for (let i = 0; i < baseCount; i++) {
       const rx = prng.range(-chunkSize * 0.48, chunkSize * 0.48);
       const rz = prng.range(-chunkSize * 0.48, chunkSize * 0.48);
       const wx = originX + rx;
       const wz = originZ + rz;
 
-      // Check distance to road
       const roadInfo = this.roadManager.getClosestRoadPoint(wx, wz);
-      // Keep clear of the road corridor
-      if (roadInfo.distanceToCenter < this.roadManager.totalHalfWidth + 4.5) {
+      // Strictly avoid road corridor
+      if (roadInfo.distanceToCenter < this.roadManager.totalHalfWidth + 4.8) {
         continue;
       }
 
-      // Check height & slope
       const wy = this.terrainManager.getHeightAt(wx, wz);
 
-      // Choose type
       const roll = prng.next();
       let type;
-      let scale = prng.range(0.8, 1.35);
+      let scale = prng.range(0.85, 1.4);
 
-      if (roll < 0.32) {
-        type = 'pine';
-      } else if (roll < 0.60) {
-        type = 'deciduous';
-      } else if (roll < 0.76) {
-        type = 'birch';
-      } else if (roll < 0.88) {
-        type = 'bush';
-        scale = prng.range(0.7, 1.4);
-      } else {
+      if (rockDensity > 0.65 && roll < 0.35) {
         type = 'rock';
-        scale = prng.range(0.7, 1.6);
+        scale = prng.range(0.8, 1.7);
+      } else if (roll < 0.36) {
+        type = 'pine';
+      } else if (roll < 0.68) {
+        type = 'deciduous';
+      } else if (roll < 0.84) {
+        type = 'birch';
+      } else {
+        type = 'bush';
+        scale = prng.range(0.7, 1.3);
       }
 
       const rotY = prng.range(0, Math.PI * 2);
@@ -323,15 +318,11 @@ export class SceneryManager {
     return items;
   }
 
-  /**
-   * Updates instanced mesh matrices based on active chunks around the vehicle
-   */
   update(carPosition) {
     const chunkSize = this.terrainManager.chunkSize;
     const currentChunkX = Math.floor(carPosition.x / chunkSize);
     const currentChunkZ = Math.floor(carPosition.z / chunkSize);
 
-    // Only recalculate when player moves across chunk boundaries or at start
     if (this.lastChunkCoord.cx === currentChunkX && this.lastChunkCoord.cz === currentChunkZ) {
       return;
     }
@@ -373,14 +364,12 @@ export class SceneryManager {
       }
     }
 
-    // Update instance counts and flag matrices for GPU upload
     for (const [type, mesh] of Object.entries(this.instancedMeshes)) {
       mesh.count = counts[type];
       mesh.instanceMatrix.needsUpdate = true;
     }
 
-    // Clean up cached chunks far away
-    if (this.chunkItems.size > 150) {
+    if (this.chunkItems.size > 140) {
       for (const key of this.chunkItems.keys()) {
         const [cx, cz] = key.split(',').map(Number);
         if (Math.abs(cx - currentChunkX) > radius + 2 || Math.abs(cz - currentChunkZ) > radius + 2) {

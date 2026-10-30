@@ -49,7 +49,7 @@ class SlowRoadsApp {
       powerPreference: 'high-performance'
     });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -320,7 +320,22 @@ class SlowRoadsApp {
   }
 }
 
-// Start application when DOM is ready
-window.addEventListener('DOMContentLoaded', () => {
-  new SlowRoadsApp();
-});
+function boot() {
+  try {
+    window.slowRoadsApp = new SlowRoadsApp();
+    console.log('[SlowRoads] Initialized successfully');
+  } catch (err) {
+    console.error('[SlowRoads] Startup error:', err);
+    const errBox = document.createElement('div');
+    errBox.style.cssText = 'position:fixed;top:20px;left:20px;right:20px;background:rgba(20,22,26,0.96);color:#ff5555;padding:24px;border-radius:12px;font-family:monospace;font-size:14px;z-index:999999;box-shadow:0 10px 40px rgba(0,0,0,0.5);border:1px solid #ff4444;white-space:pre-wrap;line-height:1.5;';
+    errBox.innerHTML = `<strong>Slow Roads Initialization Error:</strong>\n\n${err.stack || err.message}`;
+    document.body.appendChild(errBox);
+  }
+}
+
+// Support both already-loaded DOM (Vite ES module) and deferred DOM loading
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot);
+} else {
+  boot();
+}
