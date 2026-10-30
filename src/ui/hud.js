@@ -93,20 +93,39 @@ export class HUD {
         </nav>
       </header>
 
+      <!-- Collision Alert Banner -->
+      <div class="sr-collision-banner" id="collision-banner"></div>
+
       <!-- Center Minimal Toast -->
       <div class="sr-toast" id="hud-toast"></div>
 
-      <!-- Bottom Bar: Minimal Speedometer + Subtle Hints -->
+      <!-- Bottom Bar: Radar + Speedometer + Subtle Hints -->
       <footer class="sr-hud-bottom" id="hud-bottom-bar">
-        <div class="sr-speedometer">
-          <div class="sr-speed-digits">
-            <span class="sr-speed-num" id="speedo-val">0</span>
-            <span class="sr-speed-unit" id="speedo-unit">km/h</span>
+        <div style="display:flex;align-items:flex-end;">
+          <div class="sr-hud-radar" id="hud-radar-box" title="Highway Curvature & Obstacle Radar">
+            <canvas class="sr-radar-canvas" id="hud-radar-canvas" width="68" height="68"></canvas>
+            <span class="sr-radar-label">Radar</span>
           </div>
-          <div class="sr-speed-status">
-            <span class="sr-gear-tag" id="speedo-gear">P</span>
-            <span class="sr-surface-tag" id="speedo-surface">ROAD</span>
-            <span class="sr-autopilot-tag" id="speedo-autopilot">PILOT</span>
+
+          <div class="sr-speedometer">
+            <div style="display:flex;flex-direction:column;">
+              <div class="sr-speed-digits">
+                <span class="sr-speed-num" id="speedo-val">0</span>
+                <span class="sr-speed-unit" id="speedo-unit">km/h</span>
+              </div>
+              <div class="sr-rpm-container">
+                <div class="sr-rpm-track">
+                  <div class="sr-rpm-bar" id="hud-rpm-bar"></div>
+                </div>
+                <span class="sr-rpm-text" id="hud-rpm-text">900 RPM</span>
+              </div>
+            </div>
+
+            <div class="sr-speed-status">
+              <span class="sr-gear-tag" id="speedo-gear">P</span>
+              <span class="sr-surface-tag" id="speedo-surface">ROAD</span>
+              <span class="sr-autopilot-tag" id="speedo-autopilot">PILOT</span>
+            </div>
           </div>
         </div>
 
@@ -115,13 +134,15 @@ export class HUD {
           <span class="hint-dot">&bull;</span>
           <span><kbd>A</kbd><kbd>D</kbd> steer</span>
           <span class="hint-dot">&bull;</span>
+          <span><kbd>Space</kbd> drift</span>
+          <span class="hint-dot">&bull;</span>
           <span><kbd>T</kbd> fwd pilot</span>
           <span class="hint-dot">&bull;</span>
           <span><kbd>Y</kbd> rev pilot</span>
           <span class="hint-dot">&bull;</span>
           <span><kbd>G</kbd> garage</span>
           <span class="hint-dot">&bull;</span>
-          <span><kbd>Space</kbd> drift</span>
+          <span><kbd>L</kbd> lights</span>
           <span class="hint-dot">&bull;</span>
           <span><kbd>C</kbd> cam</span>
           <span class="hint-dot">&bull;</span>
@@ -158,6 +179,18 @@ export class HUD {
     this.elBadgeVehicle = document.getElementById('hud-badge-vehicle');
     this.elBadgeEnv = document.getElementById('hud-badge-env');
     this.elBadgeWeather = document.getElementById('hud-badge-weather');
+
+    this.elCollisionBanner = document.getElementById('collision-banner');
+    this.elRpmBar = document.getElementById('hud-rpm-bar');
+    this.elRpmText = document.getElementById('hud-rpm-text');
+    this.elRadarCanvas = document.getElementById('hud-radar-canvas');
+
+    this.vignetteEl = document.getElementById('impact-vignette');
+    if (!this.vignetteEl) {
+      this.vignetteEl = document.createElement('div');
+      this.vignetteEl.id = 'impact-vignette';
+      document.body.appendChild(this.vignetteEl);
+    }
 
     this.bindEvents();
   }
@@ -240,6 +273,15 @@ export class HUD {
       this.elCameraLabel.textContent = cameraMode;
     }
 
+    // RPM Tachometer Bar
+    if (this.elRpmBar && physics.rpm) {
+      const rpmPct = Math.min(100, Math.max(8, ((physics.rpm - 800) / 6000) * 100));
+      this.elRpmBar.style.width = `${rpmPct}%`;
+    }
+    if (this.elRpmText && physics.rpm) {
+      this.elRpmText.textContent = `${Math.round(physics.rpm)} RPM`;
+    }
+
     // Badges
     if (this.elBadgeVehicle && vehicleName) this.elBadgeVehicle.textContent = vehicleName;
     if (this.elBadgeEnv && envName) this.elBadgeEnv.textContent = envName;
@@ -262,6 +304,101 @@ export class HUD {
       this.elAutopilotTag.classList.remove('engaged');
       this.elAutopilotTag.textContent = 'PILOT';
     }
+  }
+
+  showCollisionImpact(obstacleType, speedKmh) {
+    if (this.vignetteEl) {
+      this.vignetteEl.classList.remove('impact-flash');
+      void this.vignetteEl.offsetWidth; // Force reflow
+      this.vignetteEl.classList.add('impact-flash');
+    }
+
+    if (this.elCollisionBanner) {
+      const unit = this.speedUnit === 'mph' ? 'MPH' : 'KM/H';
+      const dispSpeed = this.speedUnit === 'mph' ? Math.round(speedKmh * 0.621371) : Math.round(speedKmh);
+      this.elCollisionBanner.textContent = `${obstacleType.toUpperCase()} IMPACT — ${dispSpeed} ${unit}`;
+      this.elCollisionBanner.classList.add('visible');
+
+      if (this.bannerTimeout) clearTimeout(this.bannerTimeout);
+      this.bannerTimeout = setTimeout(() => {
+        this.elCollisionBanner.classList.remove('visible');
+      }, 1900);
+    }
+  }
+
+  drawRadar(roadManager, physics, sceneryManager = null) {
+    if (!this.elRadarCanvas || !roadManager || !this.visible) return;
+    const ctx = this.elRadarCanvas.getContext('2d');
+    const w = this.elRadarCanvas.width;
+    const h = this.elRadarCanvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const carX = physics.position.x;
+    const carZ = physics.position.z;
+    const cosH = Math.cos(physics.heading);
+    const sinH = Math.sin(physics.heading);
+
+    // Draw forward highway spline curve
+    ctx.strokeStyle = 'rgba(230, 126, 34, 0.88)';
+    ctx.lineWidth = 3.0;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+
+    const roadInfo = roadManager.getClosestRoadPoint(carX, carZ);
+    const baseDist = roadInfo ? roadInfo.distance : 0;
+
+    for (let d = 0; d <= 150; d += 10) {
+      const node = roadManager.getNodeAtDistance(baseDist + d);
+      if (!node) continue;
+      const dx = node.position.x - carX;
+      const dz = node.position.z - carZ;
+
+      // Rotate into car-local frame where Forward is UP (-Y on 2D canvas)
+      const localX = dx * cosH - dz * sinH;
+      const localZ = dx * sinH + dz * cosH;
+
+      const px = w * 0.5 + localX * 0.44;
+      const py = h * 0.78 - localZ * 0.44;
+
+      if (d === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // Draw nearby obstacles as subtle dots if in range
+    if (sceneryManager && sceneryManager.terrainManager) {
+      const chunkSize = sceneryManager.terrainManager.chunkSize;
+      const cx = Math.floor(carX / chunkSize);
+      const cz = Math.floor(carZ / chunkSize);
+
+      ctx.fillStyle = 'rgba(251, 191, 36, 0.8)';
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oz = -1; oz <= 1; oz++) {
+          const items = sceneryManager.chunkItems.get(`${cx + ox},${cz + oz}`);
+          if (!items) continue;
+          for (const it of items) {
+            if (it.type === 'bush') continue;
+            const dx = it.x - carX;
+            const dz = it.z - carZ;
+            const localX = dx * cosH - dz * sinH;
+            const localZ = dx * sinH + dz * cosH;
+            if (localZ > -8 && localZ < 75 && Math.abs(localX) < 35) {
+              const px = w * 0.5 + localX * 0.44;
+              const py = h * 0.78 - localZ * 0.44;
+              if (px >= 2 && px <= w - 2 && py >= 2 && py <= h - 2) {
+                ctx.fillRect(px - 1, py - 1, 2.5, 2.5);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Vehicle indicator dot
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(w * 0.5, h * 0.78, 3.2, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   setAudioMuted(isMuted) {

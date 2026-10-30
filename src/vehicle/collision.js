@@ -58,6 +58,8 @@ export class CollisionSystem {
         vehicle.position.x += toRoadX * (penetration + 0.08);
         vehicle.position.z += toRoadZ * (penetration + 0.08);
 
+        let collisionInfo = null;
+
         // Rebound lateral velocity
         const vDotN = vehicle.velocity.x * toRoadX + vehicle.velocity.z * toRoadZ;
         if (vDotN < 0) {
@@ -66,9 +68,14 @@ export class CollisionSystem {
           vehicle.velocity.z -= (1 + restitution) * vDotN * toRoadZ;
           vehicle.lateralSpeed *= -0.3;
           vehicle.longitudinalSpeed *= 0.82; // Friction drag against metal guardrail
-        }
 
-        collided = true;
+          collisionInfo = {
+            type: 'guardrail',
+            impactSpeedMs: Math.abs(vehicle.speed || vehicle.longitudinalSpeed),
+            contactPos: new THREE.Vector3(vehicle.position.x, vehicle.position.y + 0.35, vehicle.position.z)
+          };
+          collided = collisionInfo;
+        }
       }
     }
 
@@ -143,7 +150,12 @@ export class CollisionSystem {
 
                   // Suspension impact jolt
                   vehicle.pitch += (sp.isFront ? -0.06 : 0.06);
-                  collided = true;
+
+                  collided = {
+                    type: isRock ? 'Boulder' : 'Tree',
+                    impactSpeedMs: Math.abs(vehicle.speed || vehicle.longitudinalSpeed),
+                    contactPos: new THREE.Vector3(item.x, vehicle.position.y + 0.4, item.z)
+                  };
                 }
               }
             }
@@ -154,6 +166,9 @@ export class CollisionSystem {
 
     if (collided) {
       this.lastCollisionTime = performance.now();
+      vehicle.lastCollision = collided;
+    } else {
+      vehicle.lastCollision = null;
     }
     return collided;
   }

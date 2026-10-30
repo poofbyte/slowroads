@@ -88,12 +88,16 @@ export class VehiclePhysics {
     this.rollVelocity = 0;
     this.lastSpeed = 0;
 
-    // Status
-    this.gear = 'P'; // 'D', 'R', 'P'
+    // Status & Telemetry
+    this.gear = 'P'; // 'D1'-'D6', 'EV', 'R', 'P'
+    this.rpm = 900;
+    this.slipRatio = 0;
+    this.engineType = 'ev';
     this.isBraking = false;
     this.isReversing = false;
     this.isOnRoad = true;
     this.hasCollided = false;
+    this.lastCollision = null;
   }
 
   /**
@@ -103,6 +107,7 @@ export class VehiclePhysics {
     if (!profile) return;
     this.vehicleId = profile.id || this.vehicleId;
     this.vehicleType = profile.vehicleType || 'car';
+    this.engineType = profile.engineType || (profile.category === 'electric' ? 'ev' : (profile.category === 'twowheeler' ? 'bike' : (profile.category === 'commercial' ? 'diesel' : 'v8')));
     this.mass = profile.mass || this.mass;
     this.wheelbase = profile.wheelbase || this.wheelbase;
     this.trackWidth = profile.trackWidth || this.trackWidth;
@@ -368,10 +373,28 @@ export class VehiclePhysics {
         const revCap = Math.max(0, 1.0 - (this.longitudinalSpeed / this.maxReverseSpeed));
         fDriveLong = -this.maxReverseForce * brake * revCap * surfaceMu;
         this.isReversing = true;
-        this.gear = 'R';
       }
+    }
+
+    // Automatic 6-Speed Transmission & Engine RPM Simulation
+    const absKmh = absSpeed * 3.6;
+    if (this.longitudinalSpeed < -0.3) {
+      this.gear = 'R';
+      this.rpm = 950 + Math.min(4800, absKmh * 95);
+    } else if (absKmh < 0.8 && throttle === 0) {
+      this.gear = 'P';
+      this.rpm = 850;
     } else {
-      this.gear = absSpeed > 0.3 ? (this.longitudinalSpeed > 0 ? 'D' : 'R') : 'P';
+      const gearThresholds = [0, 32, 64, 102, 145, 190, 350];
+      let g = 1;
+      for (let i = 1; i <= 6; i++) {
+        if (absKmh >= gearThresholds[i - 1]) g = i;
+      }
+      this.gear = (this.engineType === 'ev') ? 'EV' : `D${g}`;
+      const minSpd = gearThresholds[g - 1] * 0.75;
+      const maxSpd = gearThresholds[g];
+      const gearProgress = (absKmh - minSpd) / Math.max(10, maxSpd - minSpd);
+      this.rpm = Math.max(900, Math.min(6800, 1200 + gearProgress * 4800 + throttle * 500));
     }
 
     // Handbrake locks rear wheels
@@ -437,6 +460,11 @@ export class VehiclePhysics {
 
     const dynamicYawRate = this.yawRate + accelYawDynamic * dt;
     this.yawRate = THREE.MathUtils.lerp(kinematicYawRate, dynamicYawRate, dynamicBlend);
+
+    // Dynamic Tire Slip Ratio (used for audio screech, tire smoke and persistent skid ribbons)
+    const latSlip = Math.abs(this.lateralSpeed) / 5.5;
+    const handbrakeSlip = (input.handbrake && absSpeed > 3.0) ? 0.75 : 0;
+    this.slipRatio = Math.min(1.0, latSlip + handbrakeSlip);
 
     // Low speed damping to prevent micro-drifting when stationary
     if (absSpeed < 0.8) {

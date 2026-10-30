@@ -54,6 +54,11 @@ export class CarModel {
     }
   }
 
+  toggleHeadlights() {
+    this.headlightsForcedOn = !this.headlightsForcedOn;
+    return this.headlightsForcedOn;
+  }
+
   buildContactShadow() {
     const canvas = document.createElement('canvas');
     canvas.width = 128;
@@ -97,7 +102,7 @@ export class CarModel {
     if (this.wheels) {
       for (const w of this.wheels) {
         if (w.isFront) {
-          w.steerPivot.rotation.y = state.steeringAngle;
+          w.steerPivot.rotation.y = -state.steeringAngle;
         }
         w.rollPivot.rotation.x = state.wheelRotation;
       }
@@ -112,8 +117,9 @@ export class CarModel {
       }
     }
 
-    // Night headlights
-    const hlIntensity = isNight ? 2.8 : 0.0;
+    // Night or manual headlights
+    const hlActive = isNight || this.headlightsForcedOn;
+    const hlIntensity = hlActive ? 2.8 : 0.0;
     if (this.headlights) {
       for (const spot of this.headlights) {
         spot.intensity = hlIntensity;

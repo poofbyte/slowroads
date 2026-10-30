@@ -10,6 +10,7 @@ import { VEHICLES } from './vehicle/vehicles-data.js';
 import { CarModel } from './vehicle/car.js';
 import { VehiclePhysics } from './vehicle/physics.js';
 import { SoundEngine } from './vehicle/audio.js';
+import { ImpactAndSkidFXManager } from './vehicle/effects.js';
 import { CameraController, CAMERA_MODES } from './camera/camera-controller.js';
 import { HUD } from './ui/hud.js';
 import { SettingsModal } from './ui/settings.js';
@@ -111,6 +112,8 @@ class SlowRoadsApp {
 
     this.cameraController = new CameraController(this.camera);
     this.cameraController.update(0.016, this.physics);
+
+    this.fxManager = new ImpactAndSkidFXManager(this.scene);
   }
 
   initAudio() {
@@ -216,6 +219,9 @@ class SlowRoadsApp {
 
     this.physics.applyVehicleProfile(config.physics);
     this.carModel.setVehicle(vehicleId, color, wheelStyle);
+    if (this.soundEngine) {
+      this.soundEngine.setEngineType(this.physics.engineType);
+    }
     this.hud.showToast(`Vehicle: ${config.name}`);
   }
 
@@ -321,6 +327,9 @@ class SlowRoadsApp {
         this.hud.showToast(`Camera: ${mode}`);
       } else if (e.code === 'KeyR') {
         this.resetVehicle();
+      } else if (e.code === 'KeyL') {
+        const on = this.carModel.toggleHeadlights();
+        this.hud.showToast(on ? 'Headlights: ON (L)' : 'Headlights: OFF (L)');
       } else if (e.code === 'KeyH') {
         this.hud.toggleVisibility();
       } else if (e.code === 'KeyM') {
@@ -371,8 +380,50 @@ class SlowRoadsApp {
       this.sceneryManager.update(this.physics.position);
       this.environmentManager.update(this.physics.position, dt);
       this.carModel.update(this.physics, this.environmentManager.isNight());
-      this.soundEngine.update(this.physics.speed, this.input.throttle, this.physics.isBraking);
+      this.soundEngine.update(
+        this.physics.speed,
+        this.input.throttle,
+        this.physics.isBraking,
+        this.physics.slipRatio,
+        this.physics.rpm
+      );
       this.cameraController.update(dt, this.physics);
+
+      // Collision impact feedback & FX
+      if (this.physics.lastCollision) {
+        const col = this.physics.lastCollision;
+        if (col.impactSpeedMs > 1.2) {
+          this.soundEngine.triggerCollisionSound(col.impactSpeedMs);
+          this.cameraController.triggerImpactShake(Math.min(1.0, Math.max(0.25, col.impactSpeedMs / 20)));
+          this.fxManager.spawnCollisionImpact(col.contactPos, col.impactSpeedMs);
+          this.hud.showCollisionImpact(col.type, col.impactSpeedMs * 3.6);
+        }
+      }
+
+      // 3D Tire Skidmarks & Smoke when drifting, handbraking, or hard cornering
+      if (this.physics.slipRatio > 0.35 && Math.abs(this.physics.speed) > 4.0) {
+        const halfBase = this.physics.wheelbase * 0.5;
+        const halfTrack = this.physics.trackWidth * 0.48;
+        const forwardX = Math.sin(this.physics.heading);
+        const forwardZ = Math.cos(this.physics.heading);
+        const rightX = forwardZ;
+        const rightZ = -forwardX;
+
+        const isBike = (this.physics.vehicleType === 'bike' || this.physics.vehicleType === 'scooter');
+        const wheelOffsets = isBike ? [0] : [-halfTrack, halfTrack];
+
+        for (const side of wheelOffsets) {
+          const wheelPos = new THREE.Vector3(
+            this.physics.position.x - forwardX * halfBase + rightX * side,
+            this.physics.position.y - this.physics.wheelRadius + 0.04,
+            this.physics.position.z - forwardZ * halfBase + rightZ * side
+          );
+          this.fxManager.spawnTireSmokeAndSkid(wheelPos, this.physics.heading, !this.physics.isOnRoad);
+        }
+      }
+
+      this.fxManager.update(dt);
+      this.hud.drawRadar(this.roadManager, this.physics, this.sceneryManager);
 
       const vehName = VEHICLES[this.currentVehicleId] ? VEHICLES[this.currentVehicleId].name : 'Vehicle';
       const envName = ENVIRONMENTS[this.currentEnvironmentId] ? ENVIRONMENTS[this.currentEnvironmentId].name : 'Alpine Pass';

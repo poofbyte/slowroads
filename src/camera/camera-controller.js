@@ -32,13 +32,18 @@ export class CameraController {
     this.smoothHeading = 0;
     this.orbitAngle = 0;
 
-    // FOV parameters
+    // Dynamic FOV and Screen Shake
     this.baseFov = 58;
     this.currentFov = this.baseFov;
     this.camera.fov = this.baseFov;
     this.camera.updateProjectionMatrix();
 
+    this.shakeIntensity = 0;
     this.initialized = false;
+  }
+
+  triggerImpactShake(intensity) {
+    this.shakeIntensity = Math.min(1.2, Math.max(this.shakeIntensity, intensity));
   }
 
   cycleMode() {
@@ -177,6 +182,13 @@ export class CameraController {
 
     this.camera.position.copy(this.currentPos);
     this.camera.lookAt(this.currentLookAt);
+
+    // Collision Impact Screen Shake
+    if (this.shakeIntensity > 0.01) {
+      this.camera.position.x += (Math.random() - 0.5) * this.shakeIntensity;
+      this.camera.position.y += (Math.random() - 0.5) * this.shakeIntensity;
+      this.shakeIntensity *= Math.pow(0.02, dt);
+    }
 
     // Motorcycle roll banking & road banking camera tilt
     if (this.currentMode !== CAMERA_MODES.CINEMATIC) {
