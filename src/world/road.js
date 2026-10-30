@@ -637,6 +637,7 @@ export class RoadManager {
     let bestNormal = new THREE.Vector3(0, 1, 0);
     let bestTangent = new THREE.Vector3(0, 0, 1);
     let bestBanking = 0;
+    let bestDistAlongRoad = 0;
 
     for (let i = start; i <= end; i++) {
       const n0 = this.nodes[i];
@@ -655,6 +656,7 @@ export class RoadManager {
         bestNormal.lerpVectors(n0.normal, n1.normal, proj.t).normalize();
         bestTangent.lerpVectors(n0.tangent, n1.tangent, proj.t).normalize();
         bestBanking = THREE.MathUtils.lerp(n0.banking, n1.banking, proj.t);
+        bestDistAlongRoad = THREE.MathUtils.lerp(n0.distance, n1.distance, proj.t);
       }
     }
 
@@ -664,7 +666,34 @@ export class RoadManager {
       normal: bestNormal,
       tangent: bestTangent,
       banking: bestBanking,
-      height: bestPoint.y
+      height: bestPoint.y,
+      distance: bestDistAlongRoad || (this.nodes[0] ? this.nodes[0].distance : 0)
     };
+  }
+
+  /**
+   * Samples the road spline at an exact target distance ahead (used by Tesla-style Autopilot)
+   */
+  getNodeAtDistance(targetDist) {
+    if (this.nodes.length === 0) return null;
+    if (targetDist <= this.nodes[0].distance) {
+      return { position: this.nodes[0].position.clone(), tangent: this.nodes[0].tangent.clone(), banking: this.nodes[0].banking };
+    }
+
+    for (let i = 0; i < this.nodes.length - 1; i++) {
+      const n0 = this.nodes[i];
+      const n1 = this.nodes[i + 1];
+      if (n0.distance <= targetDist && n1.distance >= targetDist) {
+        const span = n1.distance - n0.distance;
+        const t = span > 0.001 ? (targetDist - n0.distance) / span : 0;
+        const pos = new THREE.Vector3().lerpVectors(n0.position, n1.position, t);
+        const tan = new THREE.Vector3().lerpVectors(n0.tangent, n1.tangent, t).normalize();
+        const bank = THREE.MathUtils.lerp(n0.banking, n1.banking, t);
+        return { position: pos, tangent: tan, banking: bank };
+      }
+    }
+
+    const last = this.nodes[this.nodes.length - 1];
+    return { position: last.position.clone(), tangent: last.tangent.clone(), banking: last.banking };
   }
 }

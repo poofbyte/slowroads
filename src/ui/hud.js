@@ -1,6 +1,8 @@
+import * as THREE from 'three';
+
 /**
- * Ultra-Minimalist HUD inspired directly by Slow Roads
- * Non-intrusive, elegant typography and refined glassmorphic telemetry
+ * Ultra-Minimalist HUD & Telemetry inspired directly by Slow Roads
+ * Displays speed, directional gears, surface traction, autopilot status, and environmental conditions
  */
 export class HUD {
   constructor(callbacks = {}) {
@@ -15,9 +17,22 @@ export class HUD {
       <header class="sr-hud-top" id="hud-top-bar">
         <div class="sr-hud-brand">
           <span class="sr-logo-text">slow roads</span>
+          <div class="sr-hud-status-badges">
+            <span class="sr-badge" id="hud-badge-vehicle">Aero 3 Performance</span>
+            <span class="sr-badge" id="hud-badge-env">Alpine Mountain Pass</span>
+            <span class="sr-badge" id="hud-badge-weather">Morning • Clear</span>
+          </div>
         </div>
 
         <nav class="sr-hud-nav">
+          <button class="sr-nav-btn" id="btn-garage" title="Garage & Vehicle Select (G)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+              <polyline points="9 22 9 12 15 12 15 22"></polyline>
+            </svg>
+            <span class="sr-nav-label">Garage</span>
+          </button>
+
           <button class="sr-nav-btn" id="btn-camera" title="Change Camera (C)">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
               <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
@@ -26,12 +41,23 @@ export class HUD {
             <span class="sr-nav-label" id="label-camera">Chase</span>
           </button>
 
-          <button class="sr-nav-btn" id="btn-cruise" title="Cruise Control (Toggle auto-speed)">
+          <button class="sr-nav-btn" id="btn-autopilot" title="Forward Autopilot (T)">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
               <circle cx="12" cy="12" r="10"></circle>
-              <polyline points="12 6 12 12 16 14"></polyline>
+              <line x1="12" y1="2" x2="12" y2="12"></line>
+              <line x1="12" y1="12" x2="4.93" y2="19.07"></line>
+              <line x1="12" y1="12" x2="19.07" y2="19.07"></line>
             </svg>
-            <span class="sr-nav-label" id="label-cruise">Cruise</span>
+            <span class="sr-nav-label" id="label-autopilot">Autopilot</span>
+          </button>
+
+          <button class="sr-nav-btn" id="btn-rev-autopilot" title="Reverse Autopilot (Y)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 8 8 12 12 16"></polyline>
+              <line x1="16" y1="12" x2="8" y2="12"></line>
+            </svg>
+            <span class="sr-nav-label" id="label-rev-autopilot">Rev Pilot</span>
           </button>
 
           <button class="sr-nav-btn" id="btn-reset" title="Reset Vehicle to Road (R)">
@@ -80,6 +106,7 @@ export class HUD {
           <div class="sr-speed-status">
             <span class="sr-gear-tag" id="speedo-gear">P</span>
             <span class="sr-surface-tag" id="speedo-surface">ROAD</span>
+            <span class="sr-autopilot-tag" id="speedo-autopilot">PILOT</span>
           </div>
         </div>
 
@@ -87,6 +114,12 @@ export class HUD {
           <span><kbd>W</kbd><kbd>S</kbd> drive</span>
           <span class="hint-dot">&bull;</span>
           <span><kbd>A</kbd><kbd>D</kbd> steer</span>
+          <span class="hint-dot">&bull;</span>
+          <span><kbd>T</kbd> fwd pilot</span>
+          <span class="hint-dot">&bull;</span>
+          <span><kbd>Y</kbd> rev pilot</span>
+          <span class="hint-dot">&bull;</span>
+          <span><kbd>G</kbd> garage</span>
           <span class="hint-dot">&bull;</span>
           <span><kbd>Space</kbd> drift</span>
           <span class="hint-dot">&bull;</span>
@@ -114,22 +147,36 @@ export class HUD {
     this.elSpeedGear = document.getElementById('speedo-gear');
     this.elSpeedSurface = document.getElementById('speedo-surface');
     this.elCameraLabel = document.getElementById('label-camera');
-    this.elCruiseLabel = document.getElementById('label-cruise');
+    this.elAutopilotBtn = document.getElementById('btn-autopilot');
+    this.elRevAutopilotBtn = document.getElementById('btn-rev-autopilot');
+    this.elAutopilotTag = document.getElementById('speedo-autopilot');
     this.elToast = document.getElementById('hud-toast');
     this.elTopBar = document.getElementById('hud-top-bar');
     this.elBottomBar = document.getElementById('hud-bottom-bar');
     this.elBtnShowUI = document.getElementById('btn-show-ui');
 
+    this.elBadgeVehicle = document.getElementById('hud-badge-vehicle');
+    this.elBadgeEnv = document.getElementById('hud-badge-env');
+    this.elBadgeWeather = document.getElementById('hud-badge-weather');
+
     this.bindEvents();
   }
 
   bindEvents() {
-    document.getElementById('btn-camera').addEventListener('click', () => {
-      if (this.callbacks.onToggleCamera) this.callbacks.onToggleCamera();
+    document.getElementById('btn-garage').addEventListener('click', () => {
+      if (this.callbacks.onOpenGarage) this.callbacks.onOpenGarage();
     });
 
-    document.getElementById('btn-cruise').addEventListener('click', () => {
-      if (this.callbacks.onToggleCruise) this.callbacks.onToggleCruise();
+    document.getElementById('btn-autopilot').addEventListener('click', () => {
+      if (this.callbacks.onToggleAutopilot) this.callbacks.onToggleAutopilot();
+    });
+
+    document.getElementById('btn-rev-autopilot').addEventListener('click', () => {
+      if (this.callbacks.onToggleReverseAutopilot) this.callbacks.onToggleReverseAutopilot();
+    });
+
+    document.getElementById('btn-camera').addEventListener('click', () => {
+      if (this.callbacks.onToggleCamera) this.callbacks.onToggleCamera();
     });
 
     document.getElementById('btn-reset').addEventListener('click', () => {
@@ -168,7 +215,7 @@ export class HUD {
     }
   }
 
-  update(physics, cameraMode) {
+  update(physics, cameraMode, vehicleName, envName, weatherName) {
     if (!this.visible) return;
 
     const speed = this.speedUnit === 'kmh' ? physics.getSpeedKmH() : physics.getSpeedMph();
@@ -193,15 +240,27 @@ export class HUD {
       this.elCameraLabel.textContent = cameraMode;
     }
 
-    if (this.elCruiseLabel) {
-      this.elCruiseLabel.textContent = physics.cruiseControlEnabled
-        ? `Cruise: ${Math.round(physics.cruiseSpeed * (this.speedUnit === 'kmh' ? 3.6 : 2.237))}`
-        : 'Cruise';
-      if (physics.cruiseControlEnabled) {
-        document.getElementById('btn-cruise').classList.add('active');
-      } else {
-        document.getElementById('btn-cruise').classList.remove('active');
-      }
+    // Badges
+    if (this.elBadgeVehicle && vehicleName) this.elBadgeVehicle.textContent = vehicleName;
+    if (this.elBadgeEnv && envName) this.elBadgeEnv.textContent = envName;
+    if (this.elBadgeWeather && weatherName) this.elBadgeWeather.textContent = weatherName;
+
+    // Autopilot visual states
+    if (physics.autopilotEnabled) {
+      this.elAutopilotBtn.classList.add('active');
+      this.elRevAutopilotBtn.classList.remove('active');
+      this.elAutopilotTag.classList.add('engaged');
+      this.elAutopilotTag.textContent = 'FWD PILOT';
+    } else if (physics.reverseAutopilotEnabled) {
+      this.elRevAutopilotBtn.classList.add('active');
+      this.elAutopilotBtn.classList.remove('active');
+      this.elAutopilotTag.classList.add('engaged');
+      this.elAutopilotTag.textContent = 'REV PILOT';
+    } else {
+      this.elAutopilotBtn.classList.remove('active');
+      this.elRevAutopilotBtn.classList.remove('active');
+      this.elAutopilotTag.classList.remove('engaged');
+      this.elAutopilotTag.textContent = 'PILOT';
     }
   }
 
@@ -222,7 +281,7 @@ export class HUD {
     }
   }
 
-  showToast(message, duration = 2000) {
+  showToast(message, duration = 2200) {
     if (!this.elToast) return;
     this.elToast.textContent = message;
     this.elToast.classList.add('visible');
